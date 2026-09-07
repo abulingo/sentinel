@@ -21,7 +21,14 @@ function getSupabase() {
 
   if (factory) {
     try {
-      supabaseClient = factory(SUPABASE_URL, SUPABASE_ANON_KEY);
+      supabaseClient = factory(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+          storage: window.localStorage
+        }
+      });
       return supabaseClient;
     } catch (e) {
       console.error("Error al instanciar Supabase:", e);
@@ -38,7 +45,6 @@ let currentProfile = {
   telegram_session: '',
   telegram_api_id: '',
   telegram_api_hash: '',
-  pin_reset: '1234',
   pin_duress: '9999',
   pin_cancel: '0000'
 };
@@ -200,7 +206,11 @@ document.getElementById('btnLogin').addEventListener('click', async () => {
       
       // Cargar contactos directamente desde Supabase
       await loadContactsFromSupabase();
-      showScreen('contacts');
+      if (contacts.length > 0) {
+        showScreen('selectTimer');
+      } else {
+        showScreen('contacts');
+      }
     }
   } catch (err) {
     alert('Error al autenticar: ' + err.message);
@@ -216,7 +226,6 @@ document.getElementById('btnRegister').addEventListener('click', async () => {
   const apiId = document.getElementById('regApiId').value.trim();
   const apiHash = document.getElementById('regApiHash').value.trim();
   const session = document.getElementById('regSession').value.trim();
-  const pReset = document.getElementById('pinReset').value.trim();
   const pDuress = document.getElementById('pinDuress').value.trim();
   const pCancel = document.getElementById('pinCancel').value.trim();
 
@@ -240,13 +249,13 @@ document.getElementById('btnRegister').addEventListener('click', async () => {
     return;
   }
 
-  if (pReset.length !== 4 || pDuress.length !== 4 || pCancel.length !== 4) {
-    alert('Los 3 códigos PIN deben tener exactamente 4 dígitos cada uno.');
+  if (pDuress.length !== 4 || pCancel.length !== 4) {
+    alert('Los 2 códigos PIN deben tener exactamente 4 dígitos cada uno.');
     return;
   }
 
-  if (pReset === pDuress || pReset === pCancel || pDuress === pCancel) {
-    alert('Cada uno de los 3 códigos PIN debe ser diferente entre sí.');
+  if (pDuress === pCancel) {
+    alert('Los 2 códigos PIN deben ser diferentes entre sí.');
     return;
   }
 
@@ -290,7 +299,7 @@ document.getElementById('btnRegister').addEventListener('click', async () => {
       telegram_api_id: apiId,
       telegram_api_hash: apiHash,
       telegram_session: session,
-      pin_reset: pReset,
+      pin_reset: '',
       pin_duress: pDuress,
       pin_cancel: pCancel
     };
@@ -303,7 +312,7 @@ document.getElementById('btnRegister').addEventListener('click', async () => {
       telegram_api_id: apiId,
       telegram_api_hash: apiHash,
       telegram_session: session,
-      pin_reset: pReset,
+      pin_reset: '',
       pin_duress: pDuress,
       pin_cancel: pCancel,
       updated_at: new Date().toISOString()
@@ -557,8 +566,41 @@ function updateTimerUI() {
   timerDisplay.textContent = formatTime(timeRemaining);
 }
 
+function resumeRunningTimer(remainingSeconds, totalDuration) {
+  timeRemaining = remainingSeconds;
+  selectedDuration = totalDuration || remainingSeconds;
+  clearPinInput();
+  showScreen('timerActive');
+
+  initAudio();
+  clearInterval(timerInterval);
+  updateTimerUI();
+
+  timerInterval = setInterval(() => {
+    timeRemaining--;
+    updateTimerUI();
+
+    const warningThreshold = selectedDuration <= 30 ? 5 : Math.min(60, selectedDuration * 0.2);
+
+    if (timeRemaining <= warningThreshold && timeRemaining > 0) {
+      playWarningTone();
+      timerContainer.classList.add('warning-mode');
+      timerStatusLabel.textContent = '¡ATENCIÓN: INGRESA PIN!';
+    } else {
+      timerContainer.classList.remove('warning-mode');
+    }
+
+    if (timeRemaining <= 0) {
+      clearInterval(timerInterval);
+      timerRemaining = 0;
+      updateTimerUI();
+      triggerAlert('timer_expired');
+    }
+  }, 1000);
+}
+
 // ----------------------------------------------------
-// 8. TECLADO NUMÉRICO Y LÓGICA DE LOS 3 PINS DE 4 DÍGITOS
+// 8. TECLADO NUMÉRICO Y LÓGICA DE LOS PINS DE 4 DÍGITOS
 // ----------------------------------------------------
 const pinDots = [
   document.getElementById('dot0'),
@@ -606,15 +648,7 @@ document.getElementById('btnPinSubmit').addEventListener('click', () => {
 });
 
 function evaluatePin(pin) {
-  // CÓDIGO 1: VERDADERO -> Reinicia el cronómetro a la duración elegida
-  if (pin === currentProfile.pin_reset) {
-    timerContainer.classList.remove('warning-mode', 'danger-mode');
-    startTimer(selectedDuration);
-    showNotice('Cronómetro reiniciado con éxito.');
-    return;
-  }
-
-  // CÓDIGO 2: FALSO / BAJO COACCIÓN -> Dispara la alarma silenciosamente y regresa a seleccionar tiempo (igual que PIN 3)
+  // CÓDIGO 1: FALSO / BAJO COACCIÓN -> Dispara la alarma silenciosamente y regresa a seleccionar tiempo
   if (pin === currentProfile.pin_duress) {
     clearInterval(timerInterval);
     timerContainer.classList.remove('warning-mode', 'danger-mode');
@@ -626,7 +660,7 @@ function evaluatePin(pin) {
     return;
   }
 
-  // CÓDIGO 3: INICIO / CANCELAR -> Vuelve a la pantalla de selección de tiempo
+  // CÓDIGO 2: INICIO / CANCELAR -> Vuelve a la pantalla de selección de tiempo
   if (pin === currentProfile.pin_cancel) {
     clearInterval(timerInterval);
     timerContainer.classList.remove('warning-mode', 'danger-mode');
@@ -701,34 +735,59 @@ async function triggerAlert(reason) {
 // 10. INICIALIZACIÓN Y SERVICE WORKER PWA
 // ----------------------------------------------------
 window.addEventListener('DOMContentLoaded', async () => {
-  // Limpiar cualquier residuo de localStorage para cumplir la directiva de cero almacenamiento local
-  try {
-    localStorage.clear();
-  } catch (e) {}
-
   // Iniciar geolocalización
   initGeolocation();
 
-  // Comprobar si hay una sesión activa de Supabase
+  // Comprobar si hay una sesión activa de Supabase persistida
   const client = getSupabase();
   if (client && client.auth) {
     try {
-      const { data: { session } } = await client.auth.getSession();
+      const { data: { session }, error: sessionErr } = await client.auth.getSession();
       if (session && session.user) {
         currentUser = session.user;
-        const { data: profile } = await client.from('profiles').select('*').eq('id', currentUser.id).single();
+        const { data: profile } = await client.from('profiles').select('*').eq('id', currentUser.id).maybeSingle();
         if (profile) {
           currentProfile = profile;
-          document.getElementById('userBadge').textContent = profile.first_name;
+          document.getElementById('userBadge').textContent = profile.first_name || currentUser.email.split('@')[0];
+        } else {
+          document.getElementById('userBadge').textContent = currentUser.email ? currentUser.email.split('@')[0] : 'Usuario';
         }
         await loadContactsFromSupabase();
-        showScreen('contacts');
+
+        // Verificar si había un cronómetro corriendo para reanudarlo
+        const { data: activeTimer } = await client
+          .from('active_timers')
+          .select('*')
+          .eq('user_id', currentUser.id)
+          .eq('status', 'running')
+          .maybeSingle();
+
+        if (activeTimer && new Date(activeTimer.expires_at) > new Date()) {
+          const remainingSecs = Math.max(1, Math.floor((new Date(activeTimer.expires_at).getTime() - Date.now()) / 1000));
+          resumeRunningTimer(remainingSecs, activeTimer.duration_seconds);
+        } else if (contacts.length > 0) {
+          showScreen('selectTimer');
+        } else {
+          showScreen('contacts');
+        }
       } else {
         showScreen('login');
       }
     } catch (e) {
+      console.error('Error al restaurar sesión de Supabase:', e);
       showScreen('login');
     }
+
+    // Escuchar eventos de cierre de sesión
+    client.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_OUT') {
+        currentUser = null;
+        contacts = [];
+        renderContacts();
+        document.getElementById('userBadge').textContent = 'Desconectado';
+        showScreen('login');
+      }
+    });
   } else {
     showScreen('login');
   }

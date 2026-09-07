@@ -53,7 +53,7 @@
   <section id="screenRegister" class="screen">
     <h2>Registro de Seguridad</h2>
     <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom: 16px;">
-      Configura tus credenciales MTProto de Telegram y tus 3 PINs de seguridad.
+      Configura tus credenciales MTProto de Telegram y tus 2 PINs de seguridad.
     </p>
 
     <div class="form-group">
@@ -96,18 +96,13 @@
     <h3 style="font-size:0.95rem; margin-bottom:10px; color:#e2e8f0;">Códigos PIN (4 dígitos cada uno)</h3>
 
     <div class="form-group">
-      <label>PIN 1: Verdadero (Reinicia el cronómetro)</label>
-      <input type="password" id="pinReset" maxlength="4" pattern="[0-9]{4}" placeholder="Ej: 1234" required>
-    </div>
-
-    <div class="form-group">
-      <label>PIN 2: Falso / Coacción (Dispara Alarma Silenciosa)</label>
+      <label>PIN 1: Falso / Coacción (Dispara Alarma Silenciosa)</label>
       <input type="password" id="pinDuress" maxlength="4" pattern="[0-9]{4}" placeholder="Ej: 9999" required>
       <small style="color:#f87171; font-size:0.75rem;">Si te obligan a poner un código, pon este. Fingirá reiniciarse pero alertará a tus contactos.</small>
     </div>
 
     <div class="form-group">
-      <label>PIN 3: Inicio / Cancelar (Vuelve a seleccionar tiempo)</label>
+      <label>PIN 2: Inicio / Cancelar (Vuelve a seleccionar tiempo)</label>
       <input type="password" id="pinCancel" maxlength="4" pattern="[0-9]{4}" placeholder="Ej: 0000" required>
     </div>
 
