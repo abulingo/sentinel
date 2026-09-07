@@ -1,0 +1,17 @@
+{
+  "name": "Lifeguard Sentinel - Alerta Temprana",
+  "short_name": "Sentinel",
+  "description": "Sistema de alerta temprana y hombre muerto con alarma sonora/vibración y avisos automáticos por Telegram.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0b0f19",
+  "theme_color": "#e11d48",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}

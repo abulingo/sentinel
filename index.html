@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#e11d48">
+  <title>Lifeguard Sentinel - Sistema de Alerta Temprana</title>
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="style.css">
+  <!-- Supabase JS Client UMD -->
+  <script src="https://unpkg.com/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+</head>
+<body>
+
+<div class="app-container">
+  <header>
+    <div class="app-title">
+      <svg class="shield-icon" fill="currentColor" viewBox="0 0 24 24">
+        <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 2.18l7 3.12v4.7c0 4.67-3.13 8.96-7 10.08-3.87-1.12-7-5.41-7-10.08V6.3l7-3.12z"/>
+      </svg>
+      <h1>SENTINEL</h1>
+    </div>
+    <div id="userBadge" class="user-badge">Desconectado</div>
+  </header>
+
+  <!-- PANTALLA 1: INICIAR SESIÓN -->
+  <section id="screenLogin" class="screen active">
+    <h2>Iniciar Sesión</h2>
+    <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom: 16px;">
+      Accede con tu cuenta para cargar tus parámetros de seguridad y contactos.
+    </p>
+
+    <div class="form-group">
+      <label>Correo Electrónico</label>
+      <input type="email" id="loginEmail" placeholder="tu-correo@ejemplo.com" required>
+    </div>
+
+    <div class="form-group">
+      <label>Contraseña</label>
+      <input type="password" id="loginPassword" placeholder="Tu contraseña" required>
+    </div>
+
+    <button id="btnLogin" class="btn btn-primary">Entrar</button>
+
+    <div style="text-align:center; margin-top:16px;">
+      <span style="font-size:0.85rem; color:var(--text-muted);">¿No tienes cuenta?</span>
+      <button id="btnGoToRegister" class="btn btn-secondary" style="margin-top:8px;">Crear Nueva Cuenta</button>
+    </div>
+  </section>
+
+  <!-- PANTALLA 2: REGISTRO TELEGRAM Y CLAVES -->
+  <section id="screenRegister" class="screen">
+    <h2>Registro de Seguridad</h2>
+    <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom: 16px;">
+      Configura tus credenciales MTProto de Telegram y tus 3 PINs de seguridad.
+    </p>
+
+    <div class="form-group">
+      <label>Correo Electrónico</label>
+      <input type="email" id="regEmail" placeholder="tu-correo@ejemplo.com" required>
+    </div>
+
+    <div class="form-group">
+      <label>Contraseña de Acceso</label>
+      <input type="password" id="regPassword" placeholder="Contraseña (mínimo 6 caracteres)" minlength="6" required>
+    </div>
+
+    <div class="form-group">
+      <label>Primer Nombre</label>
+      <input type="text" id="regFirstName" placeholder="Ej: Carlos" required>
+    </div>
+
+    <div class="form-group">
+      <label>Número de Telegram (con código de país ej: +573155370380)</label>
+      <input type="tel" id="regPhone" placeholder="+573155370380" required>
+    </div>
+
+    <div class="form-group">
+      <label>Telegram API ID (my.telegram.org)</label>
+      <input type="text" id="regApiId" placeholder="Ej: 12345678" required>
+    </div>
+
+    <div class="form-group">
+      <label>Telegram API Hash (my.telegram.org)</label>
+      <input type="password" id="regApiHash" placeholder="Ej: 0123456789abcdef0123456789abcdef" required>
+    </div>
+
+    <div class="form-group">
+      <label>Telegram String Session (MTProto)</label>
+      <input type="password" id="regSession" placeholder="1AgBx... (Sesión de Telegram)" required>
+      <small style="color:var(--text-muted); font-size:0.75rem;">Permite enviar alertas y llamadas desde tu número personal.</small>
+    </div>
+
+    <hr style="border:0; border-top:1px solid var(--border-color); margin: 16px 0;">
+    <h3 style="font-size:0.95rem; margin-bottom:10px; color:#e2e8f0;">Códigos PIN (4 dígitos cada uno)</h3>
+
+    <div class="form-group">
+      <label>PIN 1: Verdadero (Reinicia el cronómetro)</label>
+      <input type="password" id="pinReset" maxlength="4" pattern="[0-9]{4}" placeholder="Ej: 1234" required>
+    </div>
+
+    <div class="form-group">
+      <label>PIN 2: Falso / Coacción (Dispara Alarma Silenciosa)</label>
+      <input type="password" id="pinDuress" maxlength="4" pattern="[0-9]{4}" placeholder="Ej: 9999" required>
+      <small style="color:#f87171; font-size:0.75rem;">Si te obligan a poner un código, pon este. Fingirá reiniciarse pero alertará a tus contactos.</small>
+    </div>
+
+    <div class="form-group">
+      <label>PIN 3: Inicio / Cancelar (Vuelve a seleccionar tiempo)</label>
+      <input type="password" id="pinCancel" maxlength="4" pattern="[0-9]{4}" placeholder="Ej: 0000" required>
+    </div>
+
+    <button id="btnRegister" class="btn btn-primary">Registrar y Continuar</button>
+
+    <div style="text-align:center; margin-top:12px;">
+      <button id="btnBackToLogin" class="btn btn-secondary">Ya tengo cuenta, Iniciar Sesión</button>
+    </div>
+  </section>
+
+  <!-- PANTALLA 3: GESTIÓN DE CONTACTOS DE EMERGENCIA -->
+  <section id="screenContacts" class="screen">
+    <h2>Contactos de Emergencia</h2>
+    <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom: 12px;">
+      Agrega hasta 5 contactos (guardados en tu base de datos) para llamadas y ubicación GPS.
+    </p>
+
+    <div class="form-group">
+      <input type="text" id="contactName" placeholder="Nombre (Ej: Hermano, Mamá)">
+    </div>
+    <div class="form-group">
+      <input type="tel" id="contactPhone" placeholder="Teléfono internacional (Ej: +573155370380)">
+    </div>
+    <button id="btnAddContact" class="btn btn-secondary" style="margin-top:0;">+ Guardar Contacto</button>
+
+    <ul id="contactsList" class="contacts-list"></ul>
+
+    <button id="btnGoToTimerSelect" class="btn btn-primary" style="margin-top: 16px;">
+      Continuar al Cronómetro
+    </button>
+    <button id="btnLogout" class="btn btn-secondary" style="margin-top: 8px;">Cerrar Sesión</button>
+  </section>
+
+  <!-- PANTALLA 4: SELECCIÓN DE TIEMPO -->
+  <section id="screenSelectTimer" class="screen">
+    <h2>Activar Hombre Muerto</h2>
+    <p style="font-size:0.85rem; color:var(--text-muted);">
+      Selecciona el intervalo para el control de presencia:
+    </p>
+
+    <div class="timer-grid">
+      <button class="time-btn" data-seconds="10">10 Segundos<br><small style="font-size:0.7rem; color:#94a3b8;">(Prueba)</small></button>
+      <button class="time-btn" data-seconds="300">5 Minutos</button>
+      <button class="time-btn" data-seconds="900">15 Minutos</button>
+      <button class="time-btn" data-seconds="1800">30 Minutos</button>
+      <button class="time-btn" data-seconds="3600" style="grid-column: span 2;">1 Hora</button>
+    </div>
+
+    <div class="status-badge">
+      <div class="status-indicator"></div>
+      <span id="gpsStatus">GPS: Preparado</span>
+    </div>
+
+    <button id="btnStartWatch" class="btn btn-primary" disabled>Iniciar Guardia</button>
+    <button id="btnManageContacts" class="btn btn-secondary">Gestionar Contactos</button>
+  </section>
+
+  <!-- PANTALLA 5: CRONÓMETRO EN MARCHA & TECLADO PIN -->
+  <section id="screenTimerActive" class="screen">
+    <div class="status-badge">
+      <div class="status-indicator"></div>
+      <span>Monitoreo Activo - Sentinel Guard</span>
+    </div>
+
+    <div id="timerContainer" class="timer-display-box">
+      <div id="timerDisplay" class="timer-digits">00:00</div>
+      <div id="timerStatusLabel" class="timer-sublabel">RESTANTE</div>
+    </div>
+
+    <!-- SECCIÓN DE ENTRADA DE PIN DE 4 DÍGITOS -->
+    <div class="pin-section">
+      <p style="text-align:center; font-size:0.85rem; color:var(--text-muted); margin-bottom: 12px;">
+        Ingresa tu PIN de 4 dígitos
+      </p>
+
+      <div class="pin-display">
+        <div class="pin-dot" id="dot0"></div>
+        <div class="pin-dot" id="dot1"></div>
+        <div class="pin-dot" id="dot2"></div>
+        <div class="pin-dot" id="dot3"></div>
+      </div>
+
+      <div class="numpad">
+        <button class="num-btn" data-num="1">1</button>
+        <button class="num-btn" data-num="2">2</button>
+        <button class="num-btn" data-num="3">3</button>
+        <button class="num-btn" data-num="4">4</button>
+        <button class="num-btn" data-num="5">5</button>
+        <button class="num-btn" data-num="6">6</button>
+        <button class="num-btn" data-num="7">7</button>
+        <button class="num-btn" data-num="8">8</button>
+        <button class="num-btn" data-num="9">9</button>
+        <button class="num-btn" id="btnPinClear" style="font-size:1rem;">BORRAR</button>
+        <button class="num-btn" data-num="0">0</button>
+        <button class="num-btn" id="btnPinSubmit" style="font-size:1rem; color:var(--accent-red);">OK</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Audio sintetizado para tonos agudos/distintivos -->
+<script src="app.js"></script>
+</body>
+</html>
