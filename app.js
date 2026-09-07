@@ -52,6 +52,7 @@ let contacts = [];
 let selectedDuration = 0; // en segundos
 let timerInterval = null;
 let timeRemaining = 0;
+let timerExpiresAt = null; // Timestamp UNIX exacto de vencimiento
 let currentPinInput = '';
 let currentGps = { latitude: null, longitude: null, accuracy: null };
 let audioCtx = null;
@@ -77,6 +78,9 @@ function showScreen(screenKey) {
 function initAudio() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
   }
 }
 
@@ -110,44 +114,226 @@ function playWarningTone() {
   }
 }
 
+// SIRENA DE ALARMA CONTINUA Y POTENTE (Al vencerse el cronómetro)
+let sirenInterval = null;
+
+function playAlarmSiren() {
+  try {
+    initAudio();
+    if (!audioCtx) return;
+
+    if (sirenInterval) return; // Ya está sonando
+
+    const ringSirenPulse = () => {
+      try {
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume();
+        }
+        const now = audioCtx.currentTime;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+
+        osc.type = 'sawtooth';
+        // Barrido estridente de sirena de emergencia (850Hz a 1700Hz)
+        osc.frequency.setValueAtTime(850, now);
+        osc.frequency.linearRampToValueAtTime(1700, now + 0.25);
+        osc.frequency.linearRampToValueAtTime(850, now + 0.5);
+
+        gain.gain.setValueAtTime(0.8, now);
+        gain.gain.setValueAtTime(0.8, now + 0.45);
+        gain.gain.linearRampToValueAtTime(0.01, now + 0.5);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        osc.start(now);
+        osc.stop(now + 0.5);
+
+        if (navigator.vibrate) {
+          navigator.vibrate([400, 100, 400, 100, 400]);
+        }
+      } catch (err) {
+        console.warn('[Siren Pulse Error]:', err);
+      }
+    };
+
+    ringSirenPulse();
+    sirenInterval = setInterval(ringSirenPulse, 550);
+  } catch (e) {
+    console.warn('[Alarm Audio Exception]:', e);
+  }
+}
+
+function stopAlarmSiren() {
+  if (sirenInterval) {
+    clearInterval(sirenInterval);
+    sirenInterval = null;
+  }
+  if (navigator.vibrate) {
+    navigator.vibrate(0);
+  }
+}
+
+function notifyTimerExpired() {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try {
+      const notif = new Notification('🚨 ¡SENTINEL: ALERTA ACTIVADA! 🚨', {
+        body: 'El cronómetro de seguridad ha vencido sin respuesta. Se han despachado llamadas y mensajes de auxilio.',
+        icon: 'icon.svg',
+        badge: 'icon.svg',
+        requireInteraction: true,
+        vibrate: [500, 200, 500, 200, 1000]
+      });
+      notif.onclick = () => {
+        window.focus();
+        notif.close();
+      };
+    } catch (e) {
+      console.warn('[Notification Error]:', e);
+    }
+  }
+}
+
 // ----------------------------------------------------
-// 2. GEOLOCALIZACIÓN CONSTANTE
+// 2. GEOLOCALIZACIÓN CONSTANTE Y ENVÍO CADA 20 SEGUNDOS
 // ----------------------------------------------------
+let gpsIntervalId = null;
+let lastGpsSyncTime = null;
+let wakeLockSentinel = null;
+
+async function requestWakeLock() {
+  if ('wakeLock' in navigator) {
+    try {
+      wakeLockSentinel = await navigator.wakeLock.request('screen');
+      console.log('[WakeLock] Pantalla bloqueada contra suspensión durante monitoreo.');
+    } catch (err) {
+      console.warn('[WakeLock Error]:', err.message);
+    }
+  }
+}
+
+function releaseWakeLock() {
+  if (wakeLockSentinel) {
+    try {
+      wakeLockSentinel.release();
+    } catch (e) {}
+    wakeLockSentinel = null;
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    if (timerExpiresAt && timerInterval) {
+      checkTimerStatus();
+    }
+    if (timerInterval && !wakeLockSentinel) {
+      requestWakeLock();
+    }
+  }
+});
+
+window.addEventListener('focus', () => {
+  if (timerExpiresAt && timerInterval) {
+    checkTimerStatus();
+  }
+});
+
 function initGeolocation() {
   if ('geolocation' in navigator) {
-    navigator.geolocation.watchPosition(
+    // 1. Obtener primera posición inmediata con alta precisión
+    navigator.geolocation.getCurrentPosition(
       (pos) => {
-        currentGps.latitude = pos.coords.latitude;
-        currentGps.longitude = pos.coords.longitude;
-        currentGps.accuracy = pos.coords.accuracy;
-        const gpsEl = document.getElementById('gpsStatus');
-        if (gpsEl) gpsEl.textContent = `GPS: ±${Math.round(pos.coords.accuracy)}m`;
-        
-        // Sincronizar ubicación en Supabase si el temporizador está activo
-        if (currentUser && timerInterval) {
+        updateGpsCoords(pos);
+        if (currentUser) {
           updateLocationInSupabase();
         }
       },
-      (err) => {
-        console.warn('Geolocation warning:', err.message);
-      },
-      { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
+      (err) => console.warn('[GPS Inicial Warning]:', err.message),
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
     );
+
+    // 2. Escuchar cambios de coordenadas por movimiento
+    navigator.geolocation.watchPosition(
+      (pos) => {
+        updateGpsCoords(pos);
+      },
+      (err) => console.warn('[GPS Watch Warning]:', err.message),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+    );
+
+    // 3. Envío constante cada 20 segundos a Supabase
+    if (!gpsIntervalId) {
+      gpsIntervalId = setInterval(() => {
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            updateGpsCoords(pos);
+            updateLocationInSupabase();
+          },
+          (err) => {
+            // Si la antena demora, enviar la última posición válida en memoria
+            if (currentGps.latitude !== null && currentGps.longitude !== null) {
+              updateLocationInSupabase();
+            }
+          },
+          { enableHighAccuracy: true, timeout: 6000, maximumAge: 15000 }
+        );
+      }, 20000); // 20 segundos exactos
+    }
+  } else {
+    console.warn('Geolocalización no soportada en este navegador.');
+    const gpsEl = document.getElementById('gpsStatus');
+    if (gpsEl) gpsEl.textContent = 'GPS: No disponible';
+  }
+}
+
+function updateGpsCoords(pos) {
+  currentGps.latitude = pos.coords.latitude;
+  currentGps.longitude = pos.coords.longitude;
+  currentGps.accuracy = pos.coords.accuracy;
+
+  const accText = `GPS: ±${Math.round(pos.coords.accuracy)}m`;
+  const gpsEl = document.getElementById('gpsStatus');
+  if (gpsEl) gpsEl.textContent = accText;
+
+  const timerGpsEl = document.getElementById('activeTimerGpsStatus');
+  if (timerGpsEl) {
+    const syncText = lastGpsSyncTime
+      ? ` • Sync: ${lastGpsSyncTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+      : '';
+    timerGpsEl.textContent = `Monitoreo Activo - ${accText}${syncText}`;
   }
 }
 
 async function updateLocationInSupabase() {
   const client = getSupabase();
   if (!client || !currentUser) return;
-  await client
-    .from('active_timers')
-    .update({
-      last_latitude: currentGps.latitude,
-      last_longitude: currentGps.longitude,
-      last_accuracy: currentGps.accuracy,
-      location_updated_at: new Date().toISOString()
-    })
-    .eq('user_id', currentUser.id);
+  if (currentGps.latitude === null || currentGps.longitude === null) return;
+
+  try {
+    const { error } = await client
+      .from('active_timers')
+      .update({
+        last_latitude: currentGps.latitude,
+        last_longitude: currentGps.longitude,
+        last_accuracy: currentGps.accuracy,
+        location_updated_at: new Date().toISOString()
+      })
+      .eq('user_id', currentUser.id);
+
+    if (error) {
+      console.warn('[GPS Sync Supabase Error]:', error.message);
+    } else {
+      lastGpsSyncTime = new Date();
+      console.log(`📍 [GPS 20s Sync] Ubicación enviada a Supabase: ${currentGps.latitude.toFixed(5)}, ${currentGps.longitude.toFixed(5)} (±${Math.round(currentGps.accuracy)}m) a las ${lastGpsSyncTime.toLocaleTimeString()}`);
+      
+      const timerGpsEl = document.getElementById('activeTimerGpsStatus');
+      if (timerGpsEl) {
+        timerGpsEl.textContent = `Monitoreo Activo - GPS: ±${Math.round(currentGps.accuracy)}m • Sync: ${lastGpsSyncTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+      }
+    }
+  } catch (e) {
+    console.warn('[GPS Exception]:', e);
+  }
 }
 
 // ----------------------------------------------------
@@ -508,57 +694,59 @@ const timerDisplay = document.getElementById('timerDisplay');
 const timerContainer = document.getElementById('timerContainer');
 const timerStatusLabel = document.getElementById('timerStatusLabel');
 
-function startTimer(durationSeconds) {
+async function startTimer(durationSeconds) {
+  selectedDuration = durationSeconds;
   timeRemaining = durationSeconds;
+  timerExpiresAt = Date.now() + durationSeconds * 1000;
   clearPinInput();
   showScreen('timerActive');
 
+  // Solicitar permiso de notificaciones para alertar si el usuario cambia de app
+  if ('Notification' in window && Notification.permission === 'default') {
+    try {
+      Notification.requestPermission();
+    } catch (e) {}
+  }
+
   // Activar audio context con el primer click del usuario
   initAudio();
+  requestWakeLock();
 
-  // Registrar inicio en Supabase si está disponible
+  // Registrar inicio en Supabase con fecha de vencimiento absoluta
   const client = getSupabase();
   if (client && currentUser) {
-    const expiresAt = new Date(Date.now() + durationSeconds * 1000).toISOString();
-    client.from('active_timers').upsert({
-      user_id: currentUser.id,
-      duration_seconds: durationSeconds,
-      started_at: new Date().toISOString(),
-      expires_at: expiresAt,
-      status: 'running',
-      alert_triggered: false,
-      last_latitude: currentGps.latitude,
-      last_longitude: currentGps.longitude
-    });
+    const expiresAtIso = new Date(timerExpiresAt).toISOString();
+    try {
+      const { error: timerErr } = await client
+        .from('active_timers')
+        .upsert({
+          user_id: currentUser.id,
+          duration_seconds: durationSeconds,
+          started_at: new Date().toISOString(),
+          expires_at: expiresAtIso,
+          status: 'running',
+          alert_triggered: false,
+          last_latitude: currentGps.latitude,
+          last_longitude: currentGps.longitude,
+          last_accuracy: currentGps.accuracy,
+          location_updated_at: new Date().toISOString()
+        }, { onConflict: 'user_id' });
+
+      if (timerErr) {
+        console.error('❌ Error registrando timer en Supabase:', timerErr.message);
+      } else {
+        console.log(`✅ Timer registrado en Supabase. Vence exactamente a las: ${expiresAtIso}`);
+      }
+    } catch (dbErr) {
+      console.error('❌ Error conexión Supabase active_timers:', dbErr);
+    }
   }
 
   clearInterval(timerInterval);
   updateTimerUI();
 
   timerInterval = setInterval(() => {
-    timeRemaining--;
-    updateTimerUI();
-
-    // UMBRAL DE ADVERTENCIA:
-    // Para timers <= 15s: avisa en los últimos 5s.
-    // Para timers largos: avisa cuando falte el 20% o menos de 60 segundos.
-    const warningThreshold = durationSeconds <= 30 ? 5 : Math.min(60, durationSeconds * 0.2);
-
-    if (timeRemaining <= warningThreshold && timeRemaining > 0) {
-      // Activar sonido y vibración distintivos para avisar al usuario que ingrese su PIN
-      playWarningTone();
-      timerContainer.classList.add('warning-mode');
-      timerStatusLabel.textContent = '¡ATENCIÓN: INGRESA PIN!';
-    } else {
-      timerContainer.classList.remove('warning-mode');
-    }
-
-    if (timeRemaining <= 0) {
-      clearInterval(timerInterval);
-      timerRemaining = 0;
-      updateTimerUI();
-      triggerAlert('timer_expired');
-    }
+    checkTimerStatus();
   }, 1000);
 }
 
@@ -566,36 +754,47 @@ function updateTimerUI() {
   timerDisplay.textContent = formatTime(timeRemaining);
 }
 
+function checkTimerStatus() {
+  if (!timerExpiresAt) return;
+
+  const now = Date.now();
+  timeRemaining = Math.max(0, Math.round((timerExpiresAt - now) / 1000));
+  updateTimerUI();
+
+  // UMBRAL DE ADVERTENCIA:
+  const warningThreshold = selectedDuration <= 30 ? 5 : Math.min(60, selectedDuration * 0.2);
+
+  if (timeRemaining <= warningThreshold && timeRemaining > 0) {
+    playWarningTone();
+    timerContainer.classList.add('warning-mode');
+    timerStatusLabel.textContent = '¡ATENCIÓN: INGRESA PIN!';
+  } else if (timeRemaining > warningThreshold) {
+    timerContainer.classList.remove('warning-mode');
+  }
+
+  if (timeRemaining <= 0) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+    timerExpiresAt = null;
+    updateTimerUI();
+    triggerAlert('timer_expired');
+  }
+}
+
 function resumeRunningTimer(remainingSeconds, totalDuration) {
-  timeRemaining = remainingSeconds;
   selectedDuration = totalDuration || remainingSeconds;
+  timeRemaining = remainingSeconds;
+  timerExpiresAt = Date.now() + remainingSeconds * 1000;
   clearPinInput();
   showScreen('timerActive');
 
   initAudio();
+  requestWakeLock();
   clearInterval(timerInterval);
   updateTimerUI();
 
   timerInterval = setInterval(() => {
-    timeRemaining--;
-    updateTimerUI();
-
-    const warningThreshold = selectedDuration <= 30 ? 5 : Math.min(60, selectedDuration * 0.2);
-
-    if (timeRemaining <= warningThreshold && timeRemaining > 0) {
-      playWarningTone();
-      timerContainer.classList.add('warning-mode');
-      timerStatusLabel.textContent = '¡ATENCIÓN: INGRESA PIN!';
-    } else {
-      timerContainer.classList.remove('warning-mode');
-    }
-
-    if (timeRemaining <= 0) {
-      clearInterval(timerInterval);
-      timerRemaining = 0;
-      updateTimerUI();
-      triggerAlert('timer_expired');
-    }
+    checkTimerStatus();
   }, 1000);
 }
 
@@ -651,6 +850,10 @@ function evaluatePin(pin) {
   // CÓDIGO 1: FALSO / BAJO COACCIÓN -> Dispara la alarma silenciosamente y regresa a seleccionar tiempo
   if (pin === currentProfile.pin_duress) {
     clearInterval(timerInterval);
+    timerInterval = null;
+    timerExpiresAt = null;
+    releaseWakeLock();
+    stopAlarmSiren();
     timerContainer.classList.remove('warning-mode', 'danger-mode');
     clearPinInput();
     // Disparo de alarma silenciosa en segundo plano
@@ -663,8 +866,23 @@ function evaluatePin(pin) {
   // CÓDIGO 2: INICIO / CANCELAR -> Vuelve a la pantalla de selección de tiempo
   if (pin === currentProfile.pin_cancel) {
     clearInterval(timerInterval);
+    timerInterval = null;
+    timerExpiresAt = null;
+    releaseWakeLock();
+    stopAlarmSiren();
     timerContainer.classList.remove('warning-mode', 'danger-mode');
     clearPinInput();
+
+    // Actualizar estado a cancelado en Supabase
+    const client = getSupabase();
+    if (client && currentUser) {
+      client.from('active_timers').update({
+        status: 'cancelled',
+        alert_triggered: false,
+        updated_at: new Date().toISOString()
+      }).eq('user_id', currentUser.id);
+    }
+
     showScreen('selectTimer');
     return;
   }
@@ -685,8 +903,15 @@ function showNotice(msg) {
 // 9. ACTIVACIÓN DE ALERTA (REGISTRO EN SUPABASE & DISPARO EN RENDER)
 // ----------------------------------------------------
 async function triggerAlert(reason) {
+  releaseWakeLock();
   timerContainer.classList.add('danger-mode');
   timerStatusLabel.textContent = 'ALERTA ACTIVADA';
+
+  // Sonar sirena potente continua si NO es coacción bajo amenaza
+  if (reason !== 'duress_pin_coaccion') {
+    playAlarmSiren();
+    notifyTimerExpired();
+  }
 
   console.warn(`[SENTINEL] ¡Alerta de emergencia activada! Razón: ${reason}`);
 
@@ -762,9 +987,15 @@ window.addEventListener('DOMContentLoaded', async () => {
           .eq('status', 'running')
           .maybeSingle();
 
-        if (activeTimer && new Date(activeTimer.expires_at) > new Date()) {
-          const remainingSecs = Math.max(1, Math.floor((new Date(activeTimer.expires_at).getTime() - Date.now()) / 1000));
-          resumeRunningTimer(remainingSecs, activeTimer.duration_seconds);
+        if (activeTimer) {
+          if (new Date(activeTimer.expires_at) > new Date()) {
+            const remainingSecs = Math.max(1, Math.floor((new Date(activeTimer.expires_at).getTime() - Date.now()) / 1000));
+            resumeRunningTimer(remainingSecs, activeTimer.duration_seconds);
+          } else {
+            // Venció mientras el navegador estaba cerrado o suspendido
+            showScreen('timerActive');
+            triggerAlert('timer_expired');
+          }
         } else if (contacts.length > 0) {
           showScreen('selectTimer');
         } else {
