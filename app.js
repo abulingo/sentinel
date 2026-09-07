@@ -73,8 +73,13 @@ function showScreen(screenKey) {
 }
 
 // ----------------------------------------------------
-// 1. SISTEMA DE AUDIO Y VIBRACIÓN DISTINTIVOS (Web Audio API)
+// 1. SISTEMA DE AUDIO, KEEP-ALIVE Y VIBRACIÓN (SEGUNDO PLANO Y ALERTAS)
 // ----------------------------------------------------
+let warningSoundInterval = null;
+let isWarningActive = false;
+let bgKeepAliveAudio = null;
+let bgWorker = null;
+
 function initAudio() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -84,37 +89,233 @@ function initAudio() {
   }
 }
 
-// Sonido penetrante y único para Alerta Temprana (bip oscilante bifrecuencia)
+// Generador de audio silencioso en formato WAV PCM para mantener despierta la app en segundo plano
+function getSilentAudioBlobUrl() {
+  const sampleRate = 8000;
+  const numSamples = sampleRate * 1; // 1 segundo
+  const buffer = new Uint8Array(44 + numSamples);
+  // RIFF
+  buffer[0] = 0x52; buffer[1] = 0x49; buffer[2] = 0x46; buffer[3] = 0x46;
+  const totalSize = 36 + numSamples;
+  buffer[4] = totalSize & 0xff; buffer[5] = (totalSize >> 8) & 0xff;
+  buffer[6] = (totalSize >> 16) & 0xff; buffer[7] = (totalSize >> 24) & 0xff;
+  // WAVE
+  buffer[8] = 0x57; buffer[9] = 0x41; buffer[10] = 0x56; buffer[11] = 0x45;
+  // fmt
+  buffer[12] = 0x66; buffer[13] = 0x6d; buffer[14] = 0x74; buffer[15] = 0x20;
+  buffer[16] = 16; buffer[17] = 0; buffer[18] = 0; buffer[19] = 0;
+  buffer[20] = 1; buffer[21] = 0; // PCM
+  buffer[22] = 1; buffer[23] = 0; // Mono
+  buffer[24] = sampleRate & 0xff; buffer[25] = (sampleRate >> 8) & 0xff; buffer[26] = 0; buffer[27] = 0;
+  buffer[28] = sampleRate & 0xff; buffer[29] = (sampleRate >> 8) & 0xff; buffer[30] = 0; buffer[31] = 0;
+  buffer[32] = 1; buffer[33] = 0;
+  buffer[34] = 8; buffer[35] = 0;
+  // data
+  buffer[36] = 0x64; buffer[37] = 0x61; buffer[38] = 0x74; buffer[39] = 0x61;
+  buffer[40] = numSamples & 0xff; buffer[41] = (numSamples >> 8) & 0xff;
+  buffer[42] = (numSamples >> 16) & 0xff; buffer[43] = (numSamples >> 24) & 0xff;
+  for (let i = 0; i < numSamples; i++) {
+    buffer[44 + i] = 128; // silencio en 8-bit PCM
+  }
+  const blob = new Blob([buffer], { type: 'audio/wav' });
+  return URL.createObjectURL(blob);
+}
+
+// Inicia reproducción de audio silencioso y MediaSession para evitar suspensión del navegador al salir a Drive / WhatsApp
+function startKeepAliveAudio() {
+  try {
+    if (!bgKeepAliveAudio) {
+      bgKeepAliveAudio = document.getElementById('bgKeepAliveAudio');
+      if (!bgKeepAliveAudio) {
+        bgKeepAliveAudio = new Audio();
+        bgKeepAliveAudio.id = 'bgKeepAliveAudio';
+        bgKeepAliveAudio.loop = true;
+        bgKeepAliveAudio.setAttribute('playsinline', '');
+      }
+      bgKeepAliveAudio.src = getSilentAudioBlobUrl();
+      bgKeepAliveAudio.volume = 0.05;
+    }
+
+    if ('mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: 'SENTINEL: Monitoreo Activo',
+          artist: 'Guardia de Hombre Muerto',
+          album: 'Alerta Temprana 20s Activa',
+          artwork: [{ src: 'icon.svg', sizes: '512x512', type: 'image/svg+xml' }]
+        });
+        navigator.mediaSession.setActionHandler('play', () => {
+          if (bgKeepAliveAudio) bgKeepAliveAudio.play().catch(() => {});
+        });
+        navigator.mediaSession.setActionHandler('pause', () => {
+          if (bgKeepAliveAudio) bgKeepAliveAudio.play().catch(() => {});
+        });
+      } catch (e) {}
+    }
+
+    bgKeepAliveAudio.play().catch(e => {
+      console.log('[Audio Keeper Notice]:', e.message);
+    });
+  } catch (err) {
+    console.warn('[Audio Keeper Error]:', err);
+  }
+}
+
+function stopKeepAliveAudio() {
+  if (bgKeepAliveAudio) {
+    try {
+      bgKeepAliveAudio.pause();
+      bgKeepAliveAudio.currentTime = 0;
+    } catch (e) {}
+  }
+}
+
+// Web Worker para temporización y GPS sin throttle en pestañas en segundo plano
+function initBackgroundWorker() {
+  if (bgWorker) return;
+  try {
+    const workerScript = `
+      var tickInterval = null;
+      var gpsInterval = null;
+      self.onmessage = function(e) {
+        if (e.data === 'start') {
+          if (!tickInterval) {
+            tickInterval = setInterval(function() {
+              self.postMessage('TICK');
+            }, 1000);
+          }
+          if (!gpsInterval) {
+            gpsInterval = setInterval(function() {
+              self.postMessage('GPS');
+            }, 10000); // 10 segundos continuos
+          }
+        } else if (e.data === 'stop') {
+          if (tickInterval) clearInterval(tickInterval);
+          if (gpsInterval) clearInterval(gpsInterval);
+          tickInterval = null;
+          gpsInterval = null;
+        }
+      };
+    `;
+    const blob = new Blob([workerScript], { type: 'application/javascript' });
+    bgWorker = new Worker(URL.createObjectURL(blob));
+    bgWorker.onmessage = function(e) {
+      if (e.data === 'TICK') {
+        if (timerExpiresAt && timerInterval) {
+          checkTimerStatus();
+        }
+      } else if (e.data === 'GPS') {
+        syncGpsLocation();
+      }
+    };
+  } catch (err) {
+    console.warn('[WebWorker Error]:', err);
+  }
+}
+
+function startBackgroundWorker() {
+  initBackgroundWorker();
+  if (bgWorker) {
+    bgWorker.postMessage('start');
+  }
+}
+
+function stopBackgroundWorker() {
+  if (bgWorker) {
+    bgWorker.postMessage('stop');
+  }
+}
+
+// Sonido penetrante y distintivo para Alerta Temprana (20 segundos antes del vencimiento)
 function playWarningTone() {
   try {
     initAudio();
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+    const now = audioCtx.currentTime;
+
+    // Primer pulso agudo penetrante
+    const osc1 = audioCtx.createOscillator();
+    const gain1 = audioCtx.createGain();
+    osc1.type = 'sawtooth';
+    osc1.frequency.setValueAtTime(950, now);
+    osc1.frequency.exponentialRampToValueAtTime(1750, now + 0.12);
+    gain1.gain.setValueAtTime(0.75, now);
+    gain1.gain.exponentialRampToValueAtTime(0.01, now + 0.14);
+    osc1.connect(gain1);
+    gain1.connect(audioCtx.destination);
+    osc1.start(now);
+    osc1.stop(now + 0.14);
+
+    // Segundo pulso 150ms después
+    const osc2 = audioCtx.createOscillator();
+    const gain2 = audioCtx.createGain();
+    osc2.type = 'sawtooth';
+    osc2.frequency.setValueAtTime(1250, now + 0.16);
+    osc2.frequency.exponentialRampToValueAtTime(2000, now + 0.28);
+    gain2.gain.setValueAtTime(0.75, now + 0.16);
+    gain2.gain.exponentialRampToValueAtTime(0.01, now + 0.30);
+    osc2.connect(gain2);
+    gain2.connect(audioCtx.destination);
+    osc2.start(now + 0.16);
+    osc2.stop(now + 0.30);
+  } catch (err) {
+    console.error("Audio warning error:", err);
+  }
+
+  // Patrón de vibración urgente
+  if (navigator.vibrate) {
+    navigator.vibrate([200, 80, 200]);
+  }
+}
+
+function startWarningTone() {
+  if (warningSoundInterval) return;
+  playWarningTone();
+  warningSoundInterval = setInterval(() => {
+    playWarningTone();
+  }, 1000); // Repetir cada segundo durante los 20 segundos
+}
+
+function stopWarningTone() {
+  if (warningSoundInterval) {
+    clearInterval(warningSoundInterval);
+    warningSoundInterval = null;
+  }
+  isWarningActive = false;
+}
+
+// Tono suave armónico de confirmación al reiniciar cronómetro con PIN
+function playConfirmationChime() {
+  try {
+    initAudio();
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+    const now = audioCtx.currentTime;
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
 
-    osc.type = 'sawtooth';
-    // Frecuencia dual penetrante distinta a notificaciones convencionales
-    osc.frequency.setValueAtTime(880, audioCtx.currentTime); // La5
-    osc.frequency.exponentialRampToValueAtTime(1760, audioCtx.currentTime + 0.2); // La6
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(523.25, now); // Do5
+    osc.frequency.setValueAtTime(659.25, now + 0.12); // Mi5
+    osc.frequency.setValueAtTime(783.99, now + 0.24); // Sol5
 
-    gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.35);
+    gain.gain.setValueAtTime(0.4, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.45);
 
     osc.connect(gain);
     gain.connect(audioCtx.destination);
 
-    osc.start();
-    osc.stop(audioCtx.currentTime + 0.35);
-  } catch (err) {
-    console.error("Audio error:", err);
-  }
-
-  // Patrón de vibración continuo de alerta: [vibrar, pausa, vibrar, pausa]
-  if (navigator.vibrate) {
-    navigator.vibrate([300, 100, 300, 100, 500]);
+    osc.start(now);
+    osc.stop(now + 0.45);
+  } catch (e) {
+    console.warn("Chime error:", e);
   }
 }
 
-// SIRENA DE ALARMA CONTINUA Y POTENTE (Al vencerse el cronómetro)
+// SIRENA DE ALARMA CONTINUA Y POTENTE (Al vencerse el cronómetro a 0)
 let sirenInterval = null;
 
 function playAlarmSiren() {
@@ -139,8 +340,8 @@ function playAlarmSiren() {
         osc.frequency.linearRampToValueAtTime(1700, now + 0.25);
         osc.frequency.linearRampToValueAtTime(850, now + 0.5);
 
-        gain.gain.setValueAtTime(0.8, now);
-        gain.gain.setValueAtTime(0.8, now + 0.45);
+        gain.gain.setValueAtTime(0.85, now);
+        gain.gain.setValueAtTime(0.85, now + 0.45);
         gain.gain.linearRampToValueAtTime(0.01, now + 0.5);
 
         osc.connect(gain);
@@ -174,11 +375,52 @@ function stopAlarmSiren() {
   }
 }
 
+// Notificación de advertencia 20 segundos antes del vencimiento
+function sendWarningNotification(secondsLeft) {
+  const title = `⚠️ ¡SENTINEL: FALTAN ${secondsLeft} SEGUNDOS!`;
+  const options = {
+    body: 'El cronómetro de seguridad está por vencerse. Ingresa tu PIN en la app para reiniciarlo y evitar la alarma.',
+    icon: 'icon.svg',
+    badge: 'icon.svg',
+    tag: 'sentinel-warning-20s',
+    renotify: true,
+    requireInteraction: true,
+    vibrate: [500, 150, 500, 150, 500]
+  };
+
+  if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({
+      type: 'SHOW_NOTIFICATION',
+      title: title,
+      options: options
+    });
+  } else if ('Notification' in window && Notification.permission === 'granted') {
+    try {
+      const notif = new Notification(title, options);
+      notif.onclick = () => {
+        window.focus();
+        notif.close();
+      };
+    } catch (e) {
+      console.warn('[Notification Warning Error]:', e);
+    }
+  }
+}
+
+function closeWarningNotification() {
+  if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({
+      type: 'CLOSE_NOTIFICATION',
+      tag: 'sentinel-warning-20s'
+    });
+  }
+}
+
 function notifyTimerExpired() {
   if ('Notification' in window && Notification.permission === 'granted') {
     try {
       const notif = new Notification('🚨 ¡SENTINEL: ALERTA ACTIVADA! 🚨', {
-        body: 'El cronómetro de seguridad ha vencido sin respuesta. Se han despachado llamadas y mensajes de auxilio.',
+        body: 'El cronómetro de seguridad ha vencido sin respuesta. Se han despachado llamadas y mensajes de auxilio con tu ubicación.',
         icon: 'icon.svg',
         badge: 'icon.svg',
         requireInteraction: true,
@@ -195,10 +437,12 @@ function notifyTimerExpired() {
 }
 
 // ----------------------------------------------------
-// 2. GEOLOCALIZACIÓN CONSTANTE Y ENVÍO CADA 20 SEGUNDOS
+// 2. GEOLOCALIZACIÓN CONSTANTE Y ENVÍO CADA 10 SEGUNDOS A SUPABASE
 // ----------------------------------------------------
 let gpsIntervalId = null;
 let lastGpsSyncTime = null;
+let lastGpsSentTimestamp = 0;
+let isGpsSyncing = false;
 let wakeLockSentinel = null;
 
 async function requestWakeLock() {
@@ -223,6 +467,9 @@ function releaseWakeLock() {
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
     if (timerExpiresAt && timerInterval) {
       checkTimerStatus();
     }
@@ -233,10 +480,48 @@ document.addEventListener('visibilitychange', () => {
 });
 
 window.addEventListener('focus', () => {
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
   if (timerExpiresAt && timerInterval) {
     checkTimerStatus();
   }
 });
+
+// Sincronización continua de ubicación a Supabase cada 10 segundos
+function syncGpsLocation() {
+  const now = Date.now();
+  // Evitar disparos redundantes si pasaron menos de 7 segundos
+  if (now - lastGpsSentTimestamp < 7000 || isGpsSyncing) {
+    return;
+  }
+
+  if (!currentUser) return;
+
+  if ('geolocation' in navigator) {
+    isGpsSyncing = true;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        isGpsSyncing = false;
+        lastGpsSentTimestamp = Date.now();
+        updateGpsCoords(pos);
+        updateLocationInSupabase();
+      },
+      (err) => {
+        isGpsSyncing = false;
+        // Si demora o falla el GPS satelital, enviar la última posición válida en memoria
+        if (currentGps.latitude !== null && currentGps.longitude !== null) {
+          lastGpsSentTimestamp = Date.now();
+          updateLocationInSupabase();
+        }
+      },
+      { enableHighAccuracy: true, timeout: 5000, maximumAge: 10000 }
+    );
+  } else if (currentGps.latitude !== null && currentGps.longitude !== null) {
+    lastGpsSentTimestamp = Date.now();
+    updateLocationInSupabase();
+  }
+}
 
 function initGeolocation() {
   if ('geolocation' in navigator) {
@@ -252,32 +537,20 @@ function initGeolocation() {
       { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
     );
 
-    // 2. Escuchar cambios de coordenadas por movimiento
+    // 2. Escuchar cambios de coordenadas por movimiento continuo
     navigator.geolocation.watchPosition(
       (pos) => {
         updateGpsCoords(pos);
       },
       (err) => console.warn('[GPS Watch Warning]:', err.message),
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 5000 }
     );
 
-    // 3. Envío constante cada 20 segundos a Supabase
+    // 3. Envío constante cada 10 segundos a Supabase
     if (!gpsIntervalId) {
       gpsIntervalId = setInterval(() => {
-        navigator.geolocation.getCurrentPosition(
-          (pos) => {
-            updateGpsCoords(pos);
-            updateLocationInSupabase();
-          },
-          (err) => {
-            // Si la antena demora, enviar la última posición válida en memoria
-            if (currentGps.latitude !== null && currentGps.longitude !== null) {
-              updateLocationInSupabase();
-            }
-          },
-          { enableHighAccuracy: true, timeout: 6000, maximumAge: 15000 }
-        );
-      }, 20000); // 20 segundos exactos
+        syncGpsLocation();
+      }, 10000); // 10 segundos exactos
     }
   } else {
     console.warn('Geolocalización no soportada en este navegador.');
@@ -324,7 +597,7 @@ async function updateLocationInSupabase() {
       console.warn('[GPS Sync Supabase Error]:', error.message);
     } else {
       lastGpsSyncTime = new Date();
-      console.log(`📍 [GPS 20s Sync] Ubicación enviada a Supabase: ${currentGps.latitude.toFixed(5)}, ${currentGps.longitude.toFixed(5)} (±${Math.round(currentGps.accuracy)}m) a las ${lastGpsSyncTime.toLocaleTimeString()}`);
+      console.log(`📍 [GPS 10s Sync] Ubicación enviada a Supabase: ${currentGps.latitude.toFixed(5)}, ${currentGps.longitude.toFixed(5)} (±${Math.round(currentGps.accuracy)}m) a las ${lastGpsSyncTime.toLocaleTimeString()}`);
       
       const timerGpsEl = document.getElementById('activeTimerGpsStatus');
       if (timerGpsEl) {
@@ -518,6 +791,16 @@ document.getElementById('btnRegister').addEventListener('click', async () => {
 
 // CERRAR SESIÓN (Limpia memoria y vuelve a Login)
 document.getElementById('btnLogout').addEventListener('click', async () => {
+  stopWarningTone();
+  stopAlarmSiren();
+  stopKeepAliveAudio();
+  stopBackgroundWorker();
+  closeWarningNotification();
+  releaseWakeLock();
+  clearInterval(timerInterval);
+  timerInterval = null;
+  timerExpiresAt = null;
+
   const client = getSupabase();
   if (client && client.auth) {
     await client.auth.signOut();
@@ -694,11 +977,47 @@ const timerDisplay = document.getElementById('timerDisplay');
 const timerContainer = document.getElementById('timerContainer');
 const timerStatusLabel = document.getElementById('timerStatusLabel');
 
+let isExitMode = false;
+let exitModeTimeout = null;
+let noticeTimeout = null;
+
+function formatDurationLabel(seconds) {
+  if (seconds >= 3600) return `${Math.round(seconds / 3600)} h`;
+  if (seconds >= 60) return `${Math.round(seconds / 60)} min`;
+  return `${seconds} s`;
+}
+
+function showNotice(msg, type = 'info') {
+  const noticeEl = document.getElementById('timerNotice');
+  if (!noticeEl) return;
+  noticeEl.textContent = msg;
+  noticeEl.className = `timer-notice ${type}`;
+  noticeEl.style.display = 'block';
+
+  if (noticeTimeout) clearTimeout(noticeTimeout);
+  noticeTimeout = setTimeout(() => {
+    noticeEl.style.display = 'none';
+  }, 3500);
+}
+
+function getWarningThreshold(duration) {
+  if (duration <= 20) {
+    return Math.floor(duration / 2); // Para prueba de 10s -> 5s
+  }
+  return 20; // Exactamente 20 segundos antes para 5min, 15min, 30min y 1h
+}
+
 async function startTimer(durationSeconds) {
   selectedDuration = durationSeconds;
   timeRemaining = durationSeconds;
   timerExpiresAt = Date.now() + durationSeconds * 1000;
   clearPinInput();
+  isExitMode = false;
+  isWarningActive = false;
+  stopWarningTone();
+  stopAlarmSiren();
+  closeWarningNotification();
+  timerContainer.classList.remove('warning-mode', 'danger-mode');
   showScreen('timerActive');
 
   // Solicitar permiso de notificaciones para alertar si el usuario cambia de app
@@ -708,9 +1027,17 @@ async function startTimer(durationSeconds) {
     } catch (e) {}
   }
 
-  // Activar audio context con el primer click del usuario
+  // Activar audio context con el click del usuario
   initAudio();
+  // Iniciar audio en bucle silencioso para mantener activa la pestaña al salir a Drive o WhatsApp
+  startKeepAliveAudio();
+  // Iniciar Web Worker independiente para evitar suspensión de intervalos
+  startBackgroundWorker();
+  // Bloquear suspensión de pantalla si está en primer plano
   requestWakeLock();
+
+  // Enviar ubicación inmediata a Supabase
+  syncGpsLocation();
 
   // Registrar inicio en Supabase con fecha de vencimiento absoluta
   const client = getSupabase();
@@ -761,18 +1088,31 @@ function checkTimerStatus() {
   timeRemaining = Math.max(0, Math.round((timerExpiresAt - now) / 1000));
   updateTimerUI();
 
-  // UMBRAL DE ADVERTENCIA:
-  const warningThreshold = selectedDuration <= 30 ? 5 : Math.min(60, selectedDuration * 0.2);
+  const warningThreshold = getWarningThreshold(selectedDuration);
 
+  // UMBRAL DE ADVERTENCIA (Exactamente 20 segundos antes para 5m, 15m, 30m, 1h):
   if (timeRemaining <= warningThreshold && timeRemaining > 0) {
-    playWarningTone();
+    if (!isWarningActive) {
+      isWarningActive = true;
+      sendWarningNotification(timeRemaining);
+      startWarningTone();
+    }
     timerContainer.classList.add('warning-mode');
-    timerStatusLabel.textContent = '¡ATENCIÓN: INGRESA PIN!';
+    timerStatusLabel.textContent = `¡ATENCIÓN: QUEDAN ${timeRemaining}s! INGRESA PIN`;
   } else if (timeRemaining > warningThreshold) {
+    if (isWarningActive) {
+      stopWarningTone();
+      closeWarningNotification();
+    }
     timerContainer.classList.remove('warning-mode');
+    if (!isExitMode && timerStatusLabel.textContent.includes('ATENCIÓN')) {
+      timerStatusLabel.textContent = 'RESTANTE';
+    }
   }
 
   if (timeRemaining <= 0) {
+    stopWarningTone();
+    closeWarningNotification();
     clearInterval(timerInterval);
     timerInterval = null;
     timerExpiresAt = null;
@@ -786,9 +1126,13 @@ function resumeRunningTimer(remainingSeconds, totalDuration) {
   timeRemaining = remainingSeconds;
   timerExpiresAt = Date.now() + remainingSeconds * 1000;
   clearPinInput();
+  isExitMode = false;
+  isWarningActive = false;
   showScreen('timerActive');
 
   initAudio();
+  startKeepAliveAudio();
+  startBackgroundWorker();
   requestWakeLock();
   clearInterval(timerInterval);
   updateTimerUI();
@@ -846,57 +1190,157 @@ document.getElementById('btnPinSubmit').addEventListener('click', () => {
   }
 });
 
+// Botón para finalizar y cancelar guardia de manera voluntaria
+const btnCancelGuard = document.getElementById('btnCancelGuard');
+if (btnCancelGuard) {
+  btnCancelGuard.addEventListener('click', () => {
+    isExitMode = true;
+    showNotice('⚠️ Ingresa tu PIN de seguridad para finalizar la guardia', 'warning');
+    timerStatusLabel.textContent = 'INGRESA PIN PARA SALIR';
+
+    if (exitModeTimeout) clearTimeout(exitModeTimeout);
+    exitModeTimeout = setTimeout(() => {
+      isExitMode = false;
+      if (timerExpiresAt && timeRemaining > 0) {
+        timerStatusLabel.textContent = 'RESTANTE';
+      }
+    }, 10000);
+  });
+}
+
 function evaluatePin(pin) {
   // CÓDIGO 1: FALSO / BAJO COACCIÓN -> Dispara la alarma silenciosamente y regresa a seleccionar tiempo
   if (pin === currentProfile.pin_duress) {
+    stopWarningTone();
+    stopAlarmSiren();
+    stopKeepAliveAudio();
+    stopBackgroundWorker();
+    closeWarningNotification();
+    releaseWakeLock();
     clearInterval(timerInterval);
     timerInterval = null;
     timerExpiresAt = null;
-    releaseWakeLock();
-    stopAlarmSiren();
+    isWarningActive = false;
+    isExitMode = false;
     timerContainer.classList.remove('warning-mode', 'danger-mode');
     clearPinInput();
+
     // Disparo de alarma silenciosa en segundo plano
     triggerAlert('duress_pin_coaccion');
-    // Regresar al inicio para seleccionar tiempo
     showScreen('selectTimer');
     return;
   }
 
-  // CÓDIGO 2: INICIO / CANCELAR -> Vuelve a la pantalla de selección de tiempo
+  // CÓDIGO 2: PIN DE SEGURIDAD (Cancelar o Reiniciar)
   if (pin === currentProfile.pin_cancel) {
-    clearInterval(timerInterval);
-    timerInterval = null;
-    timerExpiresAt = null;
-    releaseWakeLock();
-    stopAlarmSiren();
-    timerContainer.classList.remove('warning-mode', 'danger-mode');
     clearPinInput();
 
-    // Actualizar estado a cancelado en Supabase
-    const client = getSupabase();
-    if (client && currentUser) {
-      client.from('active_timers').update({
-        status: 'cancelled',
-        alert_triggered: false,
-        updated_at: new Date().toISOString()
-      }).eq('user_id', currentUser.id);
+    // Caso A: El usuario pulsó "Finalizar Guardia y Salir"
+    if (isExitMode) {
+      isExitMode = false;
+      if (exitModeTimeout) clearTimeout(exitModeTimeout);
+      stopWarningTone();
+      stopAlarmSiren();
+      stopKeepAliveAudio();
+      stopBackgroundWorker();
+      closeWarningNotification();
+      releaseWakeLock();
+      clearInterval(timerInterval);
+      timerInterval = null;
+      timerExpiresAt = null;
+      isWarningActive = false;
+      timerContainer.classList.remove('warning-mode', 'danger-mode');
+
+      // Actualizar estado a cancelado en Supabase
+      const client = getSupabase();
+      if (client && currentUser) {
+        client.from('active_timers').update({
+          status: 'cancelled',
+          alert_triggered: false,
+          updated_at: new Date().toISOString()
+        }).eq('user_id', currentUser.id);
+      }
+
+      showScreen('selectTimer');
+      return;
     }
 
-    showScreen('selectTimer');
+    // Caso B: La alarma ya había sonado (sirena activa) -> apagar sirena y volver
+    if (sirenInterval || timerStatusLabel.textContent === 'ALERTA ACTIVADA') {
+      stopWarningTone();
+      stopAlarmSiren();
+      stopKeepAliveAudio();
+      stopBackgroundWorker();
+      closeWarningNotification();
+      releaseWakeLock();
+      clearInterval(timerInterval);
+      timerInterval = null;
+      timerExpiresAt = null;
+      isWarningActive = false;
+      timerContainer.classList.remove('warning-mode', 'danger-mode');
+
+      const client = getSupabase();
+      if (client && currentUser) {
+        client.from('active_timers').update({
+          status: 'cancelled',
+          alert_triggered: false,
+          updated_at: new Date().toISOString()
+        }).eq('user_id', currentUser.id);
+      }
+
+      showScreen('selectTimer');
+      return;
+    }
+
+    // Caso C: El cronómetro está corriendo o en advertencia de 20 segundos
+    // -> REINICIAR EL CRONÓMETRO AL TIEMPO SELECCIONADO (5min, 15min, 30min, 1h)
+    stopWarningTone();
+    closeWarningNotification();
+    isWarningActive = false;
+    timerContainer.classList.remove('warning-mode', 'danger-mode');
+
+    // Reiniciar tiempo al total seleccionado
+    timeRemaining = selectedDuration;
+    timerExpiresAt = Date.now() + selectedDuration * 1000;
+    updateTimerUI();
+    timerStatusLabel.textContent = 'RESTANTE';
+
+    // Reproducir tono suave de confirmación
+    playConfirmationChime();
+    if (navigator.vibrate) {
+      navigator.vibrate([80, 50, 120]);
+    }
+
+    showNotice(`✅ Cronómetro reiniciado (+${formatDurationLabel(selectedDuration)})`, 'success');
+
+    // Actualizar nueva fecha de expiración en Supabase para evitar cualquier disparo
+    const client = getSupabase();
+    if (client && currentUser) {
+      const expiresAtIso = new Date(timerExpiresAt).toISOString();
+      client.from('active_timers').update({
+        started_at: new Date().toISOString(),
+        expires_at: expiresAtIso,
+        status: 'running',
+        alert_triggered: false,
+        updated_at: new Date().toISOString()
+      }).eq('user_id', currentUser.id).then(({ error }) => {
+        if (error) {
+          console.warn('[Supabase Timer Reset Error]:', error.message);
+        } else {
+          console.log(`🔄 [Timer Reset] Cronómetro renovado exitosamente. Vence a las: ${expiresAtIso}`);
+        }
+      });
+    }
+
     return;
   }
 
   // PIN Erróneo
-  alert('Código incorrecto.');
+  if (navigator.vibrate) {
+    navigator.vibrate([100, 50, 100]);
+  }
+  showNotice('❌ PIN incorrecto', 'error');
   clearPinInput();
-}
-
-function showNotice(msg) {
-  timerStatusLabel.textContent = msg;
-  setTimeout(() => {
-    timerStatusLabel.textContent = 'RESTANTE';
-  }, 2000);
 }
 
 // ----------------------------------------------------
@@ -904,6 +1348,12 @@ function showNotice(msg) {
 // ----------------------------------------------------
 async function triggerAlert(reason) {
   releaseWakeLock();
+  stopWarningTone();
+  closeWarningNotification();
+  stopKeepAliveAudio();
+  stopBackgroundWorker();
+
+  timerContainer.classList.remove('warning-mode');
   timerContainer.classList.add('danger-mode');
   timerStatusLabel.textContent = 'ALERTA ACTIVADA';
 

@@ -37,13 +37,24 @@ self.addEventListener('fetch', (e) => {
   );
 });
 
+// Manejo de mensajes desde el cliente (mostrar notificaciones de advertencia en segundo plano)
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SHOW_NOTIFICATION') {
+    self.registration.showNotification(event.data.title, event.data.options);
+  } else if (event.data && event.data.type === 'CLOSE_NOTIFICATION') {
+    self.registration.getNotifications({ tag: event.data.tag }).then((notifications) => {
+      notifications.forEach((n) => n.close());
+    });
+  }
+});
+
 // Manejo de notificaciones de advertencia y vibración en segundo plano
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   event.waitUntil(
-    clients.matchAll({ type: 'window' }).then((clientList) => {
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
       for (const client of clientList) {
-        if (client.url.includes('index.html') && 'focus' in client) {
+        if ('focus' in client) {
           return client.focus();
         }
       }

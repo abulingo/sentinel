@@ -172,10 +172,12 @@
       <div id="timerStatusLabel" class="timer-sublabel">RESTANTE</div>
     </div>
 
+    <div id="timerNotice" class="timer-notice" style="display:none;"></div>
+
     <!-- SECCIÓN DE ENTRADA DE PIN DE 4 DÍGITOS -->
     <div class="pin-section">
       <p style="text-align:center; font-size:0.85rem; color:var(--text-muted); margin-bottom: 12px;">
-        Ingresa tu PIN de 4 dígitos
+        Ingresa tu PIN de 4 dígitos para reiniciar
       </p>
 
       <div class="pin-display">
@@ -199,10 +201,16 @@
         <button class="num-btn" data-num="0">0</button>
         <button class="num-btn" id="btnPinSubmit" style="font-size:1rem; color:var(--accent-red);">OK</button>
       </div>
+
+      <button id="btnCancelGuard" class="btn btn-secondary" style="margin-top: 14px; border: 1px solid #ef4444; color: #ef4444; background: rgba(239, 68, 68, 0.08);">
+        🛑 Finalizar Guardia y Salir
+      </button>
     </div>
   </section>
 </div>
 
+<!-- Audio keep-alive para segundo plano -->
+<audio id="bgKeepAliveAudio" loop playsinline style="display:none;"></audio>
 <!-- Audio sintetizado para tonos agudos/distintivos -->
 <script src="app.js"></script>
 </body>

@@ -225,28 +225,73 @@ input:focus, select:focus {
   letter-spacing: 1px;
 }
 
-/* Alerta Warning */
+/* Alerta Warning (20 segundos antes del vencimiento) */
 .warning-mode {
-  border-color: var(--accent-yellow) !important;
-  box-shadow: 0 0 30px var(--accent-yellow-glow);
-  animation: pulseWarning 1s infinite alternate;
+  border-color: #f59e0b !important;
+  box-shadow: 0 0 35px rgba(245, 158, 11, 0.45);
+  background: radial-gradient(circle, #fffbeb 0%, #fef3c7 100%) !important;
+  animation: pulseWarning 0.75s infinite alternate;
+}
+
+.warning-mode .timer-digits {
+  color: #b45309;
+}
+
+.warning-mode .timer-sublabel {
+  color: #d97706;
+  font-weight: 800;
 }
 
 @keyframes pulseWarning {
   0% { transform: scale(1); }
-  100% { transform: scale(1.04); }
+  100% { transform: scale(1.05); }
 }
 
 /* Alerta Danger */
 .danger-mode {
   border-color: var(--accent-red) !important;
-  box-shadow: 0 0 40px var(--accent-red-glow);
-  animation: pulseDanger 0.5s infinite alternate;
+  box-shadow: 0 0 45px var(--accent-red-glow);
+  background: radial-gradient(circle, #fef2f2 0%, #fee2e2 100%) !important;
+  animation: pulseDanger 0.4s infinite alternate;
+}
+
+.danger-mode .timer-digits {
+  color: #b91c1c;
 }
 
 @keyframes pulseDanger {
   0% { transform: scale(1); }
   100% { transform: scale(1.06); }
+}
+
+/* Notificaciones visuales dentro del temporizador */
+.timer-notice {
+  text-align: center;
+  font-size: 0.88rem;
+  font-weight: 700;
+  padding: 8px 14px;
+  border-radius: var(--radius-md);
+  margin: 8px auto 0 auto;
+  max-width: 320px;
+  animation: fadeIn 0.2s ease-in-out;
+}
+
+.timer-notice.success {
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #6ee7b7;
+}
+
+.timer-notice.warning {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+}
+
+.timer-notice.error {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fca5a5;
 }
 
 /* PIN Input Section */
